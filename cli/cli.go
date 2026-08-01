@@ -4,6 +4,7 @@ package cli
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -19,7 +20,6 @@ type Handler struct {
 	Manager    *bot.Manager
 	LogFn      func(name, msg string)
 	StartProxy func(account string) error
-	WarmProxy  func(account string)
 
 	serverMu sync.RWMutex
 	server   string
@@ -53,14 +53,50 @@ func (h *Handler) GetAccount() string {
 	return h.account
 }
 
+func (h *Handler) usage(line string) []string {
+	out := []string{line}
+	if saved := h.Manager.ListAvailable(); len(saved) > 0 {
+		out = append(out, "your accounts: "+strings.Join(saved, ", "))
+	}
+	return out
+}
+
 func (h *Handler) target() string {
 	if l := h.Manager.Lobby(); l != "" {
 		return l
 	}
+	if s := h.Manager.FirstConnectedServer(); s != "" {
+		return s
+	}
 	return h.GetServer()
 }
 
+type savedConfig struct {
+	Server  string `json:"server"`
+	Account string `json:"account"`
+}
+
+func loadConfig() savedConfig {
+	var c savedConfig
+	if data, err := os.ReadFile("config.json"); err == nil {
+		_ = json.Unmarshal(data, &c)
+	}
+	return c
+}
+
+func saveConfig(c savedConfig) {
+	data, err := json.MarshalIndent(c, "", "  ")
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile("config.json", data, 0644)
+}
+
 const prompt = "(Enter yo commands)>"
+
+const loadDelay = 3 * time.Second
+
+const settleDelay = 4 * time.Second
 
 var termMu sync.Mutex
 
@@ -128,6 +164,8 @@ func (h *Handler) Execute(input string) []string {
 		return h.cmdDisconnectAll()
 	case "listplayers":
 		return h.cmdListPlayers()
+	case "info":
+		return h.cmdInfo(args)
 	case "ip":
 		return h.cmdIP()
 	case "goto":
@@ -165,7 +203,7 @@ func (h *Handler) cmdJoin(args string) []string {
 
 	if account == "" {
 		return []string{
-			"no saved accounts, pair one first: pair Bot1",
+			"no saved accounts, pair one first: pair <any name you like>",
 		}
 	}
 	if !bot.HasToken(account) {
@@ -181,14 +219,12 @@ func (h *Handler) cmdJoin(args string) []string {
 	h.SetServer(addr)
 	h.SetAccount(account)
 	h.Manager.SetLobby("")
+	saveConfig(savedConfig{Server: addr, Account: account})
 
 	if h.StartProxy != nil {
 		if err := h.StartProxy(account); err != nil {
 			return []string{"proxy failed to start: " + err.Error()}
 		}
-	}
-	if h.WarmProxy != nil {
-		go h.WarmProxy(account)
 	}
 
 	return []string{
@@ -249,7 +285,7 @@ func (h *Handler) cmdChat(args string) []string {
 func (h *Handler) cmdUnload(args string) []string {
 	name := strings.TrimSpace(args)
 	if name == "" {
-		return []string{"Usage: unload Bot5"}
+		return h.usage("Usage: unload <name>")
 	}
 	if err := h.Manager.Disconnect(name); err != nil {
 		return []string{"Error: " + err.Error()}
@@ -260,7 +296,7 @@ func (h *Handler) cmdUnload(args string) []string {
 func (h *Handler) cmdLoad(args string) []string {
 	name := strings.TrimSpace(args)
 	if name == "" {
-		return []string{"Usage: load Bot5"}
+		return h.usage("Usage: load <name>")
 	}
 	dst := h.target()
 	if dst == "" {
@@ -270,12 +306,26 @@ func (h *Handler) cmdLoad(args string) []string {
 		return []string{"you are playing as " + name + ", it cannot also be a bot"}
 	}
 	go func() {
-		err := h.Manager.Load(name, dst, h.LogFn)
-		if err != nil && h.LogFn != nil {
-			h.LogFn(name, "Load failed: "+err.Error())
+		if err := h.Manager.Load(name, dst, h.LogFn); err != nil {
+			if h.LogFn != nil {
+				h.LogFn(name, "Load failed: "+err.Error())
+			}
+			return
 		}
+		h.reportLanding(name)
 	}()
 	return []string{"Loading " + name + " -> " + dst + " (auth may open browser)"}
+}
+
+func (h *Handler) reportLanding(name string) {
+	time.Sleep(settleDelay)
+	b, ok := h.Manager.Get(name)
+	if !ok || !b.IsConnected() {
+		return
+	}
+	if h.Manager.Lobby() == "" {
+		h.Manager.SetLobby(b.CurrentServer())
+	}
 }
 
 func (h *Handler) cmdLoadAll() []string {
@@ -298,21 +348,30 @@ func (h *Handler) cmdLoadAll() []string {
 	if len(available) == 0 {
 		return []string{
 			"only account is " + me + " and you are playing as it",
-			"pair another one: pair Bot2",
+			"pair another one: pair <any name you like>",
 		}
 	}
 
-	var lines []string
-	lines = append(lines, fmt.Sprintf("Loading %d bot(s) -> %s", len(available), dst))
-	for _, name := range available {
-		n := name
-		go func() {
-			err := h.Manager.Load(n, dst, h.LogFn)
-			if err != nil && h.LogFn != nil {
-				h.LogFn(n, "Load failed: "+err.Error())
+	go func() {
+		for i, n := range available {
+			if i > 0 {
+				time.Sleep(loadDelay)
 			}
-		}()
-		lines = append(lines, "  Loading: "+n)
+			where := h.target()
+			if err := h.Manager.Load(n, where, h.LogFn); err != nil {
+				if h.LogFn != nil {
+					h.LogFn(n, "Load failed: "+err.Error())
+				}
+				continue
+			}
+			h.reportLanding(n)
+		}
+	}()
+
+	var lines []string
+	lines = append(lines, fmt.Sprintf("Loading %d bot(s) -> %s, %v apart", len(available), dst, loadDelay))
+	for _, name := range available {
+		lines = append(lines, "  queued: "+name)
 	}
 	return lines
 }
@@ -375,7 +434,7 @@ func (h *Handler) cmdSpam(args string) []string {
 func (h *Handler) cmdDisconnect(args string) []string {
 	name := strings.TrimSpace(args)
 	if name == "" {
-		return []string{"Usage: disconnect Bot5"}
+		return h.usage("Usage: disconnect <name>")
 	}
 	if err := h.Manager.Disconnect(name); err != nil {
 		return []string{"Error: " + err.Error()}
@@ -441,6 +500,74 @@ func (h *Handler) cmdPair(args string) []string {
 	return []string{"Pairing " + name + " (browser will open for Xbox auth)"}
 }
 
+func (h *Handler) cmdInfo(args string) []string {
+	name := strings.Trim(strings.TrimSpace(args), `"'`)
+	if name == "" {
+		return []string{"Usage: info <username>"}
+	}
+
+	bots := h.Manager.All()
+	if len(bots) == 0 {
+		return []string{"No bots loaded"}
+	}
+
+	var found bot.PlayerInfo
+	var seen bool
+	var seenBy []string
+
+	for _, b := range bots {
+		info, ok := b.Lookup(name)
+		if !ok {
+			continue
+		}
+		seenBy = append(seenBy, info.SeenBy)
+		if !seen {
+			found, seen = info, true
+			continue
+		}
+		if !found.HasPos && info.HasPos {
+			found.Pos, found.HasPos = info.Pos, true
+		}
+		if found.DeviceID == "" {
+			found.DeviceID = info.DeviceID
+		}
+		if found.DeviceOS == 0 {
+			found.DeviceOS = info.DeviceOS
+		}
+		if found.XUID == "" {
+			found.XUID = info.XUID
+		}
+	}
+
+	if !seen {
+		return []string{name + " not visible to any bot"}
+	}
+
+	lines := []string{"username:   " + found.Username}
+	if found.HasPos {
+		lines = append(lines, fmt.Sprintf("position:   x=%.1f y=%.1f z=%.1f", found.Pos.X, found.Pos.Y, found.Pos.Z))
+	} else {
+		lines = append(lines, "position:   not in render range")
+	}
+	lines = append(lines,
+		"permission: "+bot.PermName(found.Perm),
+		"device os:  "+bot.DeviceOSName(found.DeviceOS),
+	)
+	if found.DeviceID != "" {
+		lines = append(lines, "device id:  "+found.DeviceID)
+	} else {
+		lines = append(lines, "device id:  not sent by server")
+	}
+	if found.XUID != "" {
+		lines = append(lines, "xuid:       "+found.XUID)
+	}
+	if found.Host {
+		lines = append(lines, "host:       yes")
+	}
+	lines = append(lines, fmt.Sprintf("seen by:    %d bot(s) - %s", len(seenBy), strings.Join(seenBy, ", ")))
+	return lines
+}
+
 func (h *Handler) cmdListPlayers() []string {
 	bots := h.Manager.All()
 	if len(bots) == 0 {
@@ -474,7 +601,7 @@ func cmdClear() {
 }
 
 func printHeader() {
-	fmt.Println("Nbot - Version: 0.1.5 Beta - Made with love from Liuxium Labs!")
+	fmt.Println("Nbot - Version: 0.1.6 Beta - Made with love from Liuxium Labs!")
 	fmt.Println("- Yes bro, I used claude for dis 100 percent (jk claude was used but for the \"ui\" and some of the chat logic)")
 	fmt.Println("- By Linus Co. (liuxium co. yep)")
 	fmt.Println()
@@ -491,7 +618,7 @@ func helpLines() []string {
 		"pos                show all bots position",
 		"debug              show bot count and status",
 		"chat <msg>         send chat with all bots",
-		"load <name>        load a bot (load Bot5)",
+		"load <name>        load one bot by its token name",
 		"loadall            load all saved bots",
 		"unload <name>      unload a bot",
 		"spam <s> <msg>     spam message every S seconds",
@@ -499,6 +626,7 @@ func helpLines() []string {
 		"disconnect <name>  disconnect a bot",
 		"disconnectall      disconnect all bots",
 		"listplayers        list visible players from bots",
+		"info <username>    username, position, permission, device id and os",
 		"ip                 show hub and where bots are",
 		"goto <ip>          move all bots to an exact server ip",
 		"pair <name>        pair a new bot account (opens browser)",
@@ -508,8 +636,19 @@ func helpLines() []string {
 }
 
 func Run(h *Handler) {
+	cfg := loadConfig()
+	if cfg.Server != "" {
+		h.SetServer(cfg.Server)
+		h.SetAccount(cfg.Account)
+	}
+
 	termMu.Lock()
 	printHeader()
+	if cfg.Server != "" {
+		fmt.Println()
+		fmt.Println("saved server: " + cfg.Server + " as " + cfg.Account)
+		fmt.Println("run join " + cfg.Server + " to start the proxy, or just loadall")
+	}
 	fmt.Println()
 	termMu.Unlock()
 

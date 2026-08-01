@@ -132,6 +132,24 @@ func (m *Manager) ReconnectAll(host string, logFn func(string, string)) {
 	}
 }
 
+func (m *Manager) Get(name string) (*Bot, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	b, ok := m.bots[name]
+	return b, ok
+}
+
+func (m *Manager) FirstConnectedServer() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, b := range m.bots {
+		if b.IsConnected() {
+			return b.CurrentServer()
+		}
+	}
+	return ""
+}
+
 func (m *Manager) All() []*Bot {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

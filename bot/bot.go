@@ -3,6 +3,7 @@ package bot
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/google/uuid"
@@ -18,7 +19,64 @@ type Vec3 struct {
 }
 
 type PlayerInfo struct {
-	UUID uuid.UUID
+	UUID      uuid.UUID
+	XUID      string
+	Username  string
+	RuntimeID uint64
+	Pos       Vec3
+	HasPos    bool
+	DeviceID  string
+	DeviceOS  int32
+	Perm      byte
+	CmdPerm   byte
+	Host      bool
+	SeenBy    string
+}
+
+func DeviceOSName(v int32) string {
+	switch protocol.DeviceOS(v) {
+	case protocol.DeviceAndroid:
+		return "Android"
+	case protocol.DeviceIOS:
+		return "iOS"
+	case protocol.DeviceOSX:
+		return "macOS"
+	case protocol.DeviceFireOS:
+		return "FireOS"
+	case protocol.DeviceHololens:
+		return "Hololens"
+	case protocol.DeviceWin10:
+		return "Windows"
+	case protocol.DeviceWin32:
+		return "Win32"
+	case protocol.DeviceDedicated:
+		return "Dedicated"
+	case protocol.DeviceOrbis:
+		return "PlayStation"
+	case protocol.DeviceNX:
+		return "Nintendo Switch"
+	case protocol.DeviceXBOX:
+		return "Xbox"
+	case protocol.DeviceLinux:
+		return "Linux"
+	case 0:
+		return "unknown"
+	}
+	return fmt.Sprintf("unknown (%d)", v)
+}
+
+func PermName(v byte) string {
+	switch v {
+	case 0:
+		return "visitor"
+	case 1:
+		return "member"
+	case 2:
+		return "operator"
+	case 3:
+		return "custom"
+	}
+	return fmt.Sprintf("%d", v)
 }
 
 type Bot struct {
@@ -29,6 +87,7 @@ type Bot struct {
 	mu        sync.RWMutex
 	pos       Vec3
 	players   map[string]*PlayerInfo
+	byRuntime map[uint64]*PlayerInfo
 	connected bool
 
 	OnLog   func(name, msg string)
@@ -37,9 +96,10 @@ type Bot struct {
 
 func New(name, host string) *Bot {
 	return &Bot{
-		Name:    name,
-		Host:    host,
-		players: make(map[string]*PlayerInfo),
+		Name:      name,
+		Host:      host,
+		players:   make(map[string]*PlayerInfo),
+		byRuntime: make(map[uint64]*PlayerInfo),
 	}
 }
 
@@ -113,7 +173,33 @@ func (b *Bot) handlePacket(pk packet.Packet) {
 	case *packet.MovePlayer:
 		if p.EntityRuntimeID == b.conn.GameData().EntityRuntimeID {
 			b.pos = Vec3{float64(p.Position[0]), float64(p.Position[1]) - 1.62, float64(p.Position[2])}
+		} else if info, ok := b.byRuntime[p.EntityRuntimeID]; ok {
+			info.Pos = Vec3{float64(p.Position[0]), float64(p.Position[1]) - 1.62, float64(p.Position[2])}
+			info.HasPos = true
 		} // no idea why
+
+	case *packet.MoveActorAbsolute:
+		if info, ok := b.byRuntime[p.EntityRuntimeID]; ok {
+			info.Pos = Vec3{float64(p.Position[0]), float64(p.Position[1]), float64(p.Position[2])}
+			info.HasPos = true
+		}
+
+	case *packet.AddPlayer:
+		info := b.players[p.Username]
+		if info == nil {
+			info = &PlayerInfo{}
+			b.players[p.Username] = info
+		}
+		info.Username = p.Username
+		info.UUID = p.UUID
+		info.RuntimeID = p.EntityRuntimeID
+		info.DeviceID = p.DeviceID
+		info.DeviceOS = p.BuildPlatform
+		info.Perm = p.AbilityData.PlayerPermissions
+		info.CmdPerm = p.AbilityData.CommandPermissions
+		info.Pos = Vec3{float64(p.Position[0]), float64(p.Position[1]), float64(p.Position[2])}
+		info.HasPos = true
+		b.byRuntime[p.EntityRuntimeID] = info
 
 	case *packet.Transfer:
 		newAddr := fmt.Sprintf("%s:%d", p.Address, p.Port)
@@ -143,12 +229,22 @@ func (b *Bot) handlePacket(pk packet.Packet) {
 	case *packet.PlayerList:
 		for _, entry := range p.Entries {
 			if p.ActionType == packet.PlayerListActionAdd {
-				if _, ok := b.players[entry.Username]; !ok {
-					b.players[entry.Username] = &PlayerInfo{UUID: entry.UUID}
+				info := b.players[entry.Username]
+				if info == nil {
+					info = &PlayerInfo{}
+					b.players[entry.Username] = info
+				}
+				info.Username = entry.Username
+				info.UUID = entry.UUID
+				info.XUID = entry.XUID
+				info.Host = entry.Host
+				if entry.BuildPlatform != 0 {
+					info.DeviceOS = entry.BuildPlatform
 				}
 			} else {
 				for name, info := range b.players {
 					if info.UUID == entry.UUID {
+						delete(b.byRuntime, info.RuntimeID)
 						delete(b.players, name)
 						break
 					}
@@ -203,6 +299,26 @@ func (b *Bot) Players() []string {
 		names = append(names, name)
 	}
 	return names
+}
+
+func (b *Bot) Lookup(name string) (PlayerInfo, bool) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	if info, ok := b.players[name]; ok {
+		c := *info
+		c.SeenBy = b.Name
+		return c, true
+	}
+	lower := strings.ToLower(name)
+	for k, info := range b.players {
+		if strings.ToLower(k) == lower {
+			c := *info
+			c.SeenBy = b.Name
+			return c, true
+		}
+	}
+	return PlayerInfo{}, false
 }
 
 func (b *Bot) IsConnected() bool {

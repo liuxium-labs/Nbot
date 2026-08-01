@@ -18,7 +18,6 @@ func main() {
 
 
 	handler.StartProxy = func(acct string) error { return proxy.Start(handler, acct) }
-	handler.WarmProxy = proxy.Warm
 
 	bot.LogWriter = cli.AuthWriter
 

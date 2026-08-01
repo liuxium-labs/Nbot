@@ -53,12 +53,6 @@ func Start(h *cli.Handler, acct string) error {
 	return nil
 }
 
-func Warm(acct string) {
-	if _, err := bot.LoadOrAuth(acct, bot.LogWriter); err != nil {
-		cli.Log("proxy account auth failed: " + err.Error())
-	}
-}
-
 func currentAccount() string {
 	mu.Lock()
 	defer mu.Unlock()
