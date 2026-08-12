@@ -6,7 +6,6 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/sandertv/gophertunnel v1.57.1
 	golang.org/x/oauth2 v0.28.0
-	golang.org/x/sys v0.41.0
 )
 
 require (
@@ -40,6 +39,7 @@ require (
 	golang.org/x/exp v0.0.0-20240909161429-701f63a606c0 // indirect
 	golang.org/x/image v0.21.0 // indirect
 	golang.org/x/net v0.50.0 // indirect
+	golang.org/x/sys v0.41.0 // indirect
 	golang.org/x/text v0.34.0 // indirect
 	golang.org/x/time v0.10.0 // indirect
 )

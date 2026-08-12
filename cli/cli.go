@@ -601,7 +601,7 @@ func cmdClear() {
 }
 
 func printHeader() {
-	fmt.Println("Nbot - Version: 0.1.6 Beta - Made with love from Liuxium Labs!")
+	fmt.Println("Nbot - Version: 0.1.7 Beta - Made with love from Liuxium Labs!")
 	fmt.Println("- Yes bro, I used claude for dis 100 percent (jk claude was used but for the \"ui\" and some of the chat logic)")
 	fmt.Println("- By Linus Co. (liuxium co. yep)")
 	fmt.Println()
